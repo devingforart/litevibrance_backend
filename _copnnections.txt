@@ -260,6 +260,11 @@ use routes::{
     remove_from_cart, checkout,
 };
 
+/// Ruta de bienvenida en `/`
+async fn root() -> &'static str {
+    "Bienvenido a la API de Lite Vibrance"
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     dotenv().ok();
@@ -275,6 +280,7 @@ async fn main() -> anyhow::Result<()> {
         .allow_headers(Any);
 
     let app = Router::new()
+        .route("/", get(root))  // <- Nueva ruta raíz para evitar 404
         .route("/api/health", get(health_check))
         .route("/api/products", get(get_products))
         .route("/api/products/:id", get(get_product_by_id))

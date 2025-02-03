@@ -33,10 +33,13 @@ async fn main() -> anyhow::Result<()> {
     let pool = db::init_db().await?;
     // Sembrar la base de datos (insertar productos de ejemplo)
     db::seed_db(&pool).await?;
-
+    let allowed_origins = [
+        "http://localhost:5173".parse::<HeaderValue>().unwrap(),
+        "https://www.litevibrance.com".parse::<HeaderValue>().unwrap(),
+    ];
     // Configura CORS para permitir peticiones desde el frontend (http://localhost:5173)
     let cors = CorsLayer::new()
-        .allow_origin("http://localhost:5173".parse::<HeaderValue>().unwrap())
+        .allow_origin(allowed_origins)
         .allow_methods(Any)
         .allow_headers(Any);
 
