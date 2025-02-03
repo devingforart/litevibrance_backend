@@ -1,0 +1,538 @@
+/home/southatoms/Escritorio/litevibrance_backend/backend_vibrance/src/db.rs
+
+Contenido:
+// /home/southatoms/Escritorio/lite_vibrance_web/server/backend_vibrance/src/db.rs
+use sqlx::{Pool, Sqlite, sqlite::SqlitePoolOptions};
+use std::env;
+use serde_json;
+
+pub type DbPool = Pool<Sqlite>;
+
+pub async fn init_db() -> anyhow::Result<DbPool> {
+    let database_url = env::var("DATABASE_URL")
+        .expect("DATABASE_URL no se encuentra en .env");
+
+    // Opción para forzar el borrado de la tabla products si existe, descomentando el bloque indicado abajo:
+    // Esto garantiza que la tabla se cree nuevamente con la columna 'photos'.
+    // Si no deseas recrear la tabla en cada ejecución, gestiona migraciones o elimina manualmente la tabla:
+    //
+    // let pool_temp = SqlitePoolOptions::new()
+    //     .max_connections(1)
+    //     .connect(&database_url)
+    //     .await?;
+    // sqlx::query("DROP TABLE IF EXISTS products")
+    //     .execute(&pool_temp)
+    //     .await?;
+
+    let pool = SqlitePoolOptions::new()
+        .max_connections(5)
+        .connect(&database_url)
+        .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uuid TEXT NOT NULL,
+            name TEXT NOT NULL,
+            email TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS products (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uuid TEXT NOT NULL,
+            name TEXT NOT NULL,
+            slug TEXT NOT NULL UNIQUE,
+            price REAL NOT NULL,
+            photos TEXT,
+            description TEXT
+        );
+        CREATE TABLE IF NOT EXISTS cart_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_uuid TEXT NOT NULL,
+            product_uuid TEXT NOT NULL,
+            quantity INTEGER NOT NULL
+        );
+        "#
+    )
+    .execute(&pool)
+    .await?;
+
+    Ok(pool)
+}
+
+pub async fn seed_db(pool: &DbPool) -> anyhow::Result<()> {
+    let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM products")
+        .fetch_one(pool)
+        .await?;
+    
+    if count.0 == 0 {
+        println!("Sembrando la base de datos con productos iniciales...");
+
+        let products = vec![
+            (
+                "prod-uuid-1",
+                "Cámara Reflex Profesional",
+                "camara-reflex-profesional",
+                799.99,
+                vec![
+                    "https://picsum.photos/seed/camera1/600/400",
+                    "https://picsum.photos/seed/camera2/600/400",
+                    "https://picsum.photos/seed/camera3/600/400",
+                    "https://picsum.photos/seed/camera4/600/400",
+                ],
+                "Esta cámara reflex profesional cuenta con un sensor de alta resolución, rápida velocidad de disparo y ópticas intercambiables para capturar imágenes de alta calidad en cualquier situación. Ideal para fotógrafos profesionales y entusiastas avanzados."
+            ),
+            (
+                "prod-uuid-2",
+                "Laptop Ultrabook",
+                "laptop-ultrabook",
+                999.99,
+                vec![
+                    "https://images.unsplash.com/photo-1481277542470-605612bd2d61?auto=format&fit=crop&w=600&q=80",
+                ],
+                "Una laptop elegante y potente que combina portabilidad y rendimiento para profesionales en movimiento."
+            ),
+            (
+                "prod-uuid-3",
+                "Smartphone Pro",
+                "smartphone-pro",
+                899.99,
+                vec![
+                    "https://images.unsplash.com/photo-1495433324511-bf8e92934d90?auto=format&fit=crop&w=600&q=80",
+                ],
+                "El Smartphone Pro ofrece una experiencia premium con una pantalla de alta resolución y cámaras avanzadas."
+            ),
+            (
+                "prod-uuid-4",
+                "Tablet 10\"",
+                "tablet-10",
+                349.99,
+                vec![
+                    "https://images.unsplash.com/photo-1542751371-adc38448a05e?auto=format&fit=crop&w=600&q=80",
+                ],
+                "Una tablet versátil perfecta para entretenimiento, lectura y productividad."
+            ),
+        ];
+
+        for (uuid, name, slug, price, photos, description) in products {
+            let photos_json = serde_json::to_string(&photos).unwrap();
+            sqlx::query(
+                "INSERT INTO products (uuid, name, slug, price, photos, description) VALUES (?1, ?2, ?3, ?4, ?5, ?6)"
+            )
+            .bind(uuid)
+            .bind(name)
+            .bind(slug)
+            .bind(price)
+            .bind(photos_json)
+            .bind(description)
+            .execute(pool)
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+
+--------------------------------------------------------------------------------
+
+/home/southatoms/Escritorio/litevibrance_backend/backend_vibrance/src/models.rs
+
+Contenido:
+// /home/southatoms/Escritorio/lite_vibrance_web/server/backend_vibrance/src/models.rs
+use serde::{Serialize, Deserialize};
+use sqlx::{Row, Error as SqlxError};
+use sqlx::sqlite::SqliteRow;
+use serde_json;
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct User {
+    pub uuid: String,
+    pub name: String,
+    pub email: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Product {
+    pub uuid: String,
+    pub name: String,
+    pub slug: String,
+    pub price: f64,
+    pub photos: Vec<String>,
+    pub description: String,
+}
+
+impl<'r> sqlx::FromRow<'r, SqliteRow> for Product {
+    fn from_row(row: &SqliteRow) -> Result<Self, SqlxError> {
+        let uuid: String = row.try_get("uuid")?;
+        let name: String = row.try_get("name")?;
+        let slug: String = row.try_get("slug")?;
+        let price: f64 = row.try_get("price")?;
+        let photos_text: Option<String> = row.try_get("photos")?;
+        let description: Option<String> = row.try_get("description")?;
+
+        let parsed_photos = match photos_text {
+            Some(txt) => serde_json::from_str::<Vec<String>>(&txt).unwrap_or_default(),
+            None => vec![],
+        };
+
+        Ok(Product {
+            uuid,
+            name,
+            slug,
+            price,
+            photos: parsed_photos,
+            description: description.unwrap_or_else(|| "".to_string()),
+        })
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CartItem {
+    pub product_uuid: String,
+    pub name: String,
+    pub image: String,
+    pub price: f64,
+    pub quantity: i32,
+}
+
+impl<'r> sqlx::FromRow<'r, SqliteRow> for CartItem {
+    fn from_row(row: &SqliteRow) -> Result<Self, SqlxError> {
+        let product_uuid: String = row.try_get("product_uuid")?;
+        let name: String = row.try_get("name")?;
+        let price: f64 = row.try_get("price")?;
+        let image: String = row.try_get("image")?;
+        let quantity: i32 = row.try_get("quantity")?;
+        Ok(CartItem { product_uuid, name, price, image, quantity })
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AuthRequest {
+    pub email: String,
+    pub password: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RegisterRequest {
+    pub name: String,
+    pub email: String,
+    pub password: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AuthResponse {
+    pub token: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AddToCartRequest {
+    pub product_uuid: String,
+    pub quantity: i32,
+}
+
+
+--------------------------------------------------------------------------------
+
+/home/southatoms/Escritorio/litevibrance_backend/backend_vibrance/src/main.rs
+
+Contenido:
+use axum::{
+    Router,
+    routing::{get, post, delete},
+};
+use dotenv::dotenv;
+use std::net::SocketAddr;
+
+// Importa el middleware de CORS
+use tower_http::cors::{CorsLayer, Any};
+use axum::http::HeaderValue;
+
+mod db;
+mod auth;
+mod models;
+mod routes;
+
+use routes::{
+    health_check,
+    get_products, get_product_by_id,
+    add_to_cart, get_cart,
+    remove_from_cart, checkout,
+};
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    dotenv().ok();
+
+    let pool = db::init_db().await?;
+    // Sembrar la base de datos (insertar productos de ejemplo)
+    db::seed_db(&pool).await?;
+
+    // Configura CORS para permitir peticiones desde el frontend (http://localhost:5173)
+    let cors = CorsLayer::new()
+        .allow_origin("http://localhost:5173".parse::<HeaderValue>().unwrap())
+        .allow_methods(Any)
+        .allow_headers(Any);
+
+    let app = Router::new()
+        .route("/api/health", get(health_check))
+        .route("/api/products", get(get_products))
+        .route("/api/products/:id", get(get_product_by_id))
+        .route("/api/cart", post(add_to_cart))
+        .route("/api/cart", get(get_cart))
+        .route("/api/cart/:product_id", delete(remove_from_cart))
+        .route("/api/checkout", post(checkout))
+        .with_state(pool)
+        .layer(cors); // Agrega el middleware de CORS
+
+    let port = std::env::var("PORT").unwrap_or_else(|_| "8080".to_string());
+    let addr = SocketAddr::from(([0, 0, 0, 0], port.parse::<u16>()?));
+
+    println!("Servidor corriendo en http://{}", addr);
+    axum::Server::bind(&addr)
+        .serve(app.into_make_service())
+        .await?;
+
+    Ok(())
+}
+
+
+--------------------------------------------------------------------------------
+
+/home/southatoms/Escritorio/litevibrance_backend/backend_vibrance/src/auth.rs
+
+Contenido:
+// server/backend_vibrance/src/auth.rs
+use anyhow::Result;
+use jsonwebtoken::{decode, DecodingKey, Validation, decode_header};
+use serde::{Serialize, Deserialize};
+use std::env;
+use reqwest;
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Claims {
+    pub sub: String, // UUID del usuario
+    pub exp: usize,  // Expiración del token (si es necesario)
+}
+
+/// Esta función valida y decodifica el token emitido por Auth0 usando su JWKS.
+pub async fn decode_jwt(token: &str) -> Result<Claims> {
+    let auth0_domain = env::var("VITE_AUTH0_DOMAIN")
+        .expect("VITE_AUTH0_DOMAIN debe estar definido en el .env");
+    let jwks_url = format!("https://{}/.well-known/jwks.json", auth0_domain);
+    
+    let jwks: serde_json::Value = reqwest::get(&jwks_url).await?.json().await?;
+    
+    let header = decode_header(token)?;
+    let kid = header.kid.ok_or_else(|| anyhow::anyhow!("No se encontró 'kid' en el header del token"))?;
+    
+    let jwk = jwks["keys"].as_array()
+        .and_then(|keys| keys.iter().find(|k| k["kid"].as_str() == Some(&kid)))
+        .ok_or_else(|| anyhow::anyhow!("No se encontró la clave (JWK) para el kid: {}", kid))?;
+    
+    let n = jwk["n"].as_str().ok_or_else(|| anyhow::anyhow!("Falta el parámetro 'n' en el JWK"))?;
+    let e = jwk["e"].as_str().ok_or_else(|| anyhow::anyhow!("Falta el parámetro 'e' en el JWK"))?;
+    
+    let decoding_key = DecodingKey::from_rsa_components(n, e)
+        .map_err(|err| anyhow::anyhow!("Error construyendo la clave de decodificación: {}", err))?;
+    
+    let mut validation = Validation::new(jsonwebtoken::Algorithm::RS256);
+    if let Ok(audience) = env::var("VITE_AUTH0_AUDIENCE") {
+        if !audience.is_empty() {
+            validation.set_audience(&[&audience]);
+        }
+    }
+    let issuer = format!("https://{}/", auth0_domain);
+    validation.set_issuer(&[&issuer]);
+    
+    let token_data = decode::<Claims>(token, &decoding_key, &validation)?;
+    Ok(token_data.claims)
+}
+
+
+--------------------------------------------------------------------------------
+
+/home/southatoms/Escritorio/litevibrance_backend/backend_vibrance/src/routes.rs
+
+Contenido:
+// ... (el resto del archivo permanece igual)
+
+use axum::{
+    extract::{State, Path, TypedHeader},
+    http::{StatusCode, Request},
+    headers::{Authorization, authorization::Bearer},
+    Json,
+};
+use sqlx::{Row, Pool, Sqlite};
+use crate::models::{ Product, AddToCartRequest, CartItem };
+use crate::auth::decode_jwt;
+
+pub type DbPool = Pool<Sqlite>;
+
+// -------------------- 1) Endpoint de salud --------------------
+pub async fn health_check() -> &'static str {
+    "OK"
+}
+
+// -------------------- 2) Obtener lista de productos --------------------
+pub async fn get_products(
+    State(pool): State<DbPool>,
+) -> Result<Json<Vec<Product>>, (StatusCode, String)> {
+    let query = r#"SELECT uuid, name, slug, price, photos, description FROM products"#;
+    let rows = sqlx::query_as::<_, Product>(query)
+        .fetch_all(&pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(rows))
+}
+
+// -------------------- 3) Obtener producto por ID --------------------
+pub async fn get_product_by_id(
+    State(pool): State<DbPool>,
+    Path(id): Path<String>,
+) -> Result<Json<Product>, (StatusCode, String)> {
+    let query = r#"
+        SELECT uuid, name, slug, price, photos, description
+        FROM products
+        WHERE slug = ?1 OR uuid = ?1
+    "#;
+
+    let product = sqlx::query_as::<_, Product>(query)
+        .bind(id)
+        .fetch_optional(&pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Error al buscar producto: {}", e)))?;
+
+    if let Some(p) = product {
+        Ok(Json(p))
+    } else {
+        Err((StatusCode::NOT_FOUND, "Producto no encontrado".to_string()))
+    }
+}
+
+// -------------------- 4) Agregar items al carrito (requiere token) --------------------
+pub async fn add_to_cart(
+    State(pool): State<DbPool>,
+    TypedHeader(Authorization(bearer)): TypedHeader<Authorization<Bearer>>,
+    Json(payload): Json<AddToCartRequest>,
+) -> Result<String, (StatusCode, String)> {
+    let token = bearer.token();
+    let claims = decode_jwt(token)
+        .await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Token inválido".to_string()))?;
+    let user_uuid = claims.sub;
+
+    let query = r#"
+        INSERT INTO cart_items (user_uuid, product_uuid, quantity)
+        VALUES (?1, ?2, ?3)
+        ON CONFLICT DO NOTHING;
+    "#;
+    sqlx::query(query)
+        .bind(user_uuid)
+        .bind(payload.product_uuid)
+        .bind(payload.quantity)
+        .execute(&pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    
+    Ok("Producto agregado al carrito".to_string())
+}
+
+// -------------------- 5) Ver carrito --------------------
+pub async fn get_cart(
+    State(pool): State<DbPool>,
+    req: Request<axum::body::Body>,
+) -> Result<Json<Vec<CartItem>>, (StatusCode, String)> {
+    let user_uuid = get_user_uuid_from_header(&req).await?;
+
+    let query = r#"
+        SELECT 
+            ci.product_uuid, 
+            p.name, 
+            p.price, 
+            json_extract(p.photos, '$[0]') as image,
+            ci.quantity 
+        FROM cart_items ci
+        JOIN products p ON ci.product_uuid = p.uuid
+        WHERE ci.user_uuid = ?1
+    "#;
+    let cart_items = sqlx::query_as::<_, CartItem>(query)
+        .bind(user_uuid)
+        .fetch_all(&pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(cart_items))
+}
+
+// -------------------- 6) Eliminar producto del carrito --------------------
+pub async fn remove_from_cart(
+    State(pool): State<DbPool>,
+    Path(product_id): Path<String>,
+    TypedHeader(Authorization(bearer)): TypedHeader<Authorization<Bearer>>,
+) -> Result<String, (StatusCode, String)> {
+    let token = bearer.token();
+    let claims = decode_jwt(token)
+        .await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Token inválido".to_string()))?;
+    let user_uuid = claims.sub;
+
+    let query = r#"
+        DELETE FROM cart_items
+        WHERE user_uuid = ?1 AND product_uuid = ?2
+    "#;
+    sqlx::query(query)
+        .bind(user_uuid)
+        .bind(product_id.clone())
+        .execute(&pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(format!("Producto '{}' eliminado del carrito", product_id))
+}
+
+// -------------------- 7) Checkout --------------------
+pub async fn checkout(
+    State(pool): State<DbPool>,
+    req: Request<axum::body::Body>,
+) -> Result<String, (StatusCode, String)> {
+    let user_uuid = get_user_uuid_from_header(&req).await?;
+
+    let query = r#"DELETE FROM cart_items WHERE user_uuid = ?1"#;
+    sqlx::query(query)
+        .bind(user_uuid)
+        .execute(&pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok("Compra finalizada con éxito!".to_string())
+}
+
+// -------------------- Función auxiliar para extraer el usuario del header --------------------
+async fn get_user_uuid_from_header(
+    req: &Request<axum::body::Body>,
+) -> Result<String, (StatusCode, String)> {
+    let auth_header = req
+        .headers()
+        .get("Authorization")
+        .ok_or((StatusCode::UNAUTHORIZED, "Falta header Authorization".to_string()))?;
+
+    let auth_str = auth_header
+        .to_str()
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Header inválido".to_string()))?;
+
+    if !auth_str.starts_with("Bearer ") {
+        return Err((StatusCode::BAD_REQUEST, "Token debe ser Bearer".to_string()));
+    }
+
+    let token = auth_str.trim_start_matches("Bearer ");
+    let claims = decode_jwt(token)
+        .await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Token inválido".to_string()))?;
+
+    Ok(claims.sub)
+}
+
+
+--------------------------------------------------------------------------------
+
